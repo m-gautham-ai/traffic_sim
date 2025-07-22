@@ -92,6 +92,9 @@ class Vehicle(pygame.sprite.Sprite):
         self.index = len(vehicles[direction]) - 1
         path = "images/" + direction + "/" + vehicleClass + ".png"
         self.image = pygame.image.load(path)
+        self.rect = self.image.get_rect()
+        self.rect.x = self.x
+        self.rect.y = self.y
         self.stop = defaultStop[direction]
 
         # Prevent spawn overlap
@@ -113,10 +116,14 @@ class Vehicle(pygame.sprite.Sprite):
         else:
             return abs(self.x - other_vehicle.x) < self.image.get_rect().width
 
+    def get_observation(self):
+        """Returns the vehicle's state as a simple observation."""
+        return [self.x, self.y, self.speed]
+
     def render(self, screen):
         screen.blit(self.image, (self.x, self.y))
 
-    def move(self):
+    def move(self, action): # action is a 2D vector: [acceleration, steering]
         # Check for vehicles ahead
         can_move = True
         for other_vehicle in vehicles[self.direction]:
@@ -149,6 +156,11 @@ class Vehicle(pygame.sprite.Sprite):
                 self.crossed = 1
                 if currentGreen != 3: can_move = False
 
+        acceleration, steering = action
+        # Apply acceleration
+        self.speed += acceleration * 0.5  # Scale factor for acceleration
+        self.speed = max(0, self.speed)    # Ensure speed is not negative
+
         if can_move:
             # Primary movement
             if self.direction == 'right':
@@ -160,18 +172,20 @@ class Vehicle(pygame.sprite.Sprite):
             elif self.direction == 'up':
                 self.y -= self.speed
 
-            # Lateral movement (drift)
-            drift = random.uniform(-0.5, 0.5) * self.speed
+            # Apply steering
             if self.direction == 'right' or self.direction == 'left':
-                self.y += drift
+                self.y += steering * 2  # Scale factor for steering
                 # Boundary check
                 if self.y < y[self.direction][0]: self.y = y[self.direction][0]
                 if self.y > y[self.direction][1]: self.y = y[self.direction][1]
             else: # up or down
-                self.x += drift
+                self.x += steering * 2  # Scale factor for steering
                 # Boundary check
                 if self.x < x[self.direction][0]: self.x = x[self.direction][0]
-                if self.x > x[self.direction][1]: self.x = x[self.direction][1] 
+                if self.x > x[self.direction][1]: self.x = x[self.direction][1]
+            
+            self.rect.x = self.x
+            self.rect.y = self.y 
 
 # Initialization of signals with default values
 # def initialize(init_done_event):
@@ -360,9 +374,57 @@ class Main:
             timeElapsedText = self.font.render(("Time Elapsed: "+str(timeElapsed)), True, self.black, self.white)
             self.screen.blit(timeElapsedText,timeElapsedCoods)
 
-            for vehicle in simulation:  
-                self.screen.blit(vehicle.image, [vehicle.x, vehicle.y])
-                vehicle.move()
+            rewards = {}
+            # Update and render vehicles
+            for vehicle in list(simulation):
+                observation = vehicle.get_observation()
+                # Generate a continuous action: [acceleration, steering]
+                acceleration_action = random.uniform(-1.0, 1.0)
+                steering_action = random.uniform(-1.0, 1.0)
+                action = [acceleration_action, steering_action]
+                vehicle.move(action)
+
+                # Base reward for surviving and moving
+                rewards[vehicle] = 0.1 * vehicle.speed
+
+                self.screen.blit(vehicle.image, vehicle.rect)
+
+                # Print RL tuple for one vehicle for demonstration
+                if vehicle.index == 0 and vehicle.direction == 'right':
+                    action_str = f"[{action[0]:.2f}, {action[1]:.2f}]"
+                    print(f"Vehicle 0 (right): Obs: {observation}, Action: {action_str}, Reward: {rewards.get(vehicle, 0):.2f}")
+
+            # Handle vehicles going off-screen
+            off_screen_vehicles = set()
+            for vehicle in list(simulation):
+                if not self.screen.get_rect().colliderect(vehicle.rect):
+                    off_screen_vehicles.add(vehicle)
+                    rewards[vehicle] = -5 # Penalty for going off-screen
+                    print(f"Vehicle went off-screen!")
+
+            # Collision detection
+            collided_vehicles = set()
+            for vehicle in list(simulation):
+                if vehicle in collided_vehicles or vehicle in off_screen_vehicles:
+                    continue
+                for other_vehicle in list(simulation):
+                    if vehicle is other_vehicle or other_vehicle in collided_vehicles or other_vehicle in off_screen_vehicles:
+                        continue
+                    if pygame.sprite.collide_rect(vehicle, other_vehicle):
+                        print(f"Collision detected!")
+                        collided_vehicles.add(vehicle)
+                        collided_vehicles.add(other_vehicle)
+                        rewards[vehicle] = -10 # Collision penalty
+                        rewards[other_vehicle] = -10 # Collision penalty
+                        break
+            
+            vehicles_to_remove = collided_vehicles.union(off_screen_vehicles)
+            if vehicles_to_remove:
+                for vehicle in vehicles_to_remove:
+                    simulation.remove(vehicle)
+                    if vehicle in vehicles[vehicle.direction]:
+                        vehicles[vehicle.direction].remove(vehicle)
+
             pygame.display.update()
 
 Main()
