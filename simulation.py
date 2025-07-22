@@ -3,7 +3,7 @@ import pygame
 import math
 
 class Simulation:
-    def __init__(self):
+    def __init__(self, max_vehicles=20):
         self.speeds = {'car': 2.25, 'bus': 1.8, 'truck': 1.8, 'bike': 2.5}
         self.x = {'right': 0, 'down': (700, 750), 'left': 1400, 'up': (600, 650)}
         self.y = {'right': (350, 500), 'down': 0, 'left': (450, 500), 'up': 800}
@@ -18,7 +18,7 @@ class Simulation:
         self.sprites = pygame.sprite.Group()
         self.time_elapsed = 0
         self.frame_count = 0
-        self.max_vehicles = 20 # Example limit
+        self.max_vehicles = max_vehicles
         self.next_vehicle_id = 0
 
         self.background = pygame.image.load('images/intersection.png')

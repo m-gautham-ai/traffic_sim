@@ -7,7 +7,7 @@ from simulation import Simulation
 class LanelessEnv(gym.Env):
     metadata = {'render_modes': ['human'], 'render_fps': 30}
 
-    def __init__(self, render_mode=None):
+    def __init__(self, render_mode=None, max_vehicles=20):
         super().__init__()
         self.render_mode = render_mode
 
@@ -17,7 +17,7 @@ class LanelessEnv(gym.Env):
             pygame.display.set_caption("Laneless Environment")
             self.clock = pygame.time.Clock()
 
-        self.simulation = Simulation()
+        self.simulation = Simulation(max_vehicles=max_vehicles)
 
         # Action space: [acceleration, steering] for each vehicle
         self.action_space = spaces.Dict()

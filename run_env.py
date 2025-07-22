@@ -4,7 +4,7 @@ import time
 
 def run_laneless_env():
     # Instantiate the environment
-    env = LanelessEnv(render_mode='human')
+    env = LanelessEnv(render_mode='human', max_vehicles=10)
 
     # Reset the environment to get the initial state
     obs, info = env.reset()
@@ -15,7 +15,7 @@ def run_laneless_env():
     episode_reward = 0
 
     # Run the simulation for a fixed number of steps
-    for step in range(500):
+    for step in range(5000):
         if terminated or truncated:
             print(f"Episode finished. Total reward: {episode_reward}")
             obs, info = env.reset()
