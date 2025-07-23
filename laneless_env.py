@@ -32,18 +32,24 @@ class LanelessEnv(gym.Env):
         return self._get_obs(), self._get_info()
 
     def step(self, actions):
-        obs, rewards, terminated, truncated = self.simulation.step(actions)
+        obs, rewards, collided_vehicles, off_screen_vehicles, is_truncated_global = self.simulation.step(actions)
         self._update_spaces(obs)
 
         if self.render_mode == "human":
             self.render()
 
-        # Filter observations and rewards to only include active agents
-        active_agents = [v.id for v in self.simulation.sprites]
-        filtered_obs = {k: v for k, v in obs.items() if k in active_agents}
-        filtered_rewards = {k: v for k, v in rewards.items() if k in active_agents}
+        # Determine which agents are terminated or truncated
+        terminated_ids = {v.id for v in collided_vehicles}.union({v.id for v in off_screen_vehicles})
+        
+        terminated = {v.id: v.id in terminated_ids for v in self.simulation.sprites}
+        truncated = {v.id: is_truncated_global for v in self.simulation.sprites}
 
-        return filtered_obs, filtered_rewards, terminated, truncated, self._get_info()
+        # An agent that is terminated should not also be truncated
+        for agent_id in terminated_ids:
+            if agent_id in truncated:
+                truncated[agent_id] = False
+
+        return obs, rewards, terminated, truncated, self._get_info()
 
     def render(self):
         if self.render_mode == 'human':

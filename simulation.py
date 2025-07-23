@@ -63,18 +63,28 @@ class Simulation:
             if vehicle_id in vehicle_map:
                 vehicle_map[vehicle_id].move(action)
 
+        # --- Handle Collisions and Off-Screen Vehicles ---
+        collided_vehicles, off_screen_vehicles = self._handle_collisions_and_offscreen()
+
         # --- Calculate Rewards ---
+        # Start with the base reward for all active vehicles
         for vehicle in self.sprites:
             rewards[vehicle.id] = self._calculate_reward(vehicle)
 
-        # --- Handle Collisions and Off-Screen Vehicles ---
-        self._handle_collisions_and_offscreen()
-        
-        observation = self.get_observation()
-        terminated = self.is_terminated()
-        truncated = self.is_truncated()
+        # Apply large penalty for collisions
+        for vehicle in collided_vehicles:
+            rewards[vehicle.id] = -100  # Large penalty for crashing
 
-        return observation, rewards, terminated, truncated
+        # Apply large reward for finishing
+        for vehicle in off_screen_vehicles:
+            rewards[vehicle.id] = 100  # Large reward for successfully exiting
+
+        # --- Finalize Step ---
+        observation = self.get_observation()
+        is_truncated_global = self.is_truncated()
+
+        # Return the sets of vehicles that have terminated, plus the global truncation flag
+        return observation, rewards, collided_vehicles, off_screen_vehicles, is_truncated_global
 
     def get_observation(self):
         # Returns a dictionary of observations for each vehicle, keyed by vehicle ID
@@ -84,31 +94,42 @@ class Simulation:
         return observations
 
     def _calculate_reward(self, vehicle):
-        TARGET_SPEED = 2.5
-        SAFE_DISTANCE = 60
+        # TARGET_SPEED = 2.5
+        # SAFE_DISTANCE = 60
         
-        # 1. Speed reward
-        speed_error = abs(vehicle.speed - TARGET_SPEED)
-        speed_reward = math.exp(-0.5 * speed_error)
+        # # 1. Speed reward
+        # speed_error = abs(vehicle.speed - TARGET_SPEED)
+        # speed_reward = math.exp(-0.5 * speed_error)
 
-        # 2. Proximity penalty
-        proximity_penalty = 0
-        for other_vehicle in self.sprites:
-            if vehicle is not other_vehicle:
-                dist = math.sqrt((vehicle.x - other_vehicle.x)**2 + (vehicle.y - other_vehicle.y)**2)
-                if dist < SAFE_DISTANCE:
-                    proximity_penalty += -1.5 * (1 - (dist / SAFE_DISTANCE))
+        # # 2. Proximity penalty
+        # proximity_penalty = 0
+        # for other_vehicle in self.sprites:
+        #     if vehicle is not other_vehicle:
+        #         dist = math.sqrt((vehicle.x - other_vehicle.x)**2 + (vehicle.y - other_vehicle.y)**2)
+        #         if dist < SAFE_DISTANCE:
+        #             proximity_penalty += -1.5 * (1 - (dist / SAFE_DISTANCE))
         
-        return speed_reward + proximity_penalty
+        # return speed_reward + proximity_penalty + STEP_PENALTY
+        """
+        Calculates the reward for a vehicle at each step.
+        The main rewards (for success or failure) are handled in the `step` function.
+        This function provides a small penalty for each step taken to encourage efficiency.
+        """
+        
+        STEP_PENALTY = -0.1  # To encourage finishing faster
+        return STEP_PENALTY
 
     def _handle_collisions_and_offscreen(self):
         off_screen_vehicles = {v for v in self.sprites if not self.background.get_rect().colliderect(v.rect)}
         
         collided_vehicles = set()
-        for vehicle in self.sprites:
-            if vehicle in off_screen_vehicles:
+        # Create a copy to iterate over, as we might modify the original group
+        for vehicle in list(self.sprites):
+            if vehicle in off_screen_vehicles or vehicle in collided_vehicles:
                 continue
+
             # Check for collisions with other vehicles
+            # False means do not kill the sprite upon collision
             colliding_list = pygame.sprite.spritecollide(vehicle, self.sprites, False, pygame.sprite.collide_rect)
             if len(colliding_list) > 1:
                 for collided in colliding_list:
@@ -116,11 +137,14 @@ class Simulation:
                         collided_vehicles.add(collided)
                 collided_vehicles.add(vehicle)
 
+        # Now, remove the vehicles from the simulation groups
         vehicles_to_remove = collided_vehicles.union(off_screen_vehicles)
         for vehicle in vehicles_to_remove:
             self.sprites.remove(vehicle)
-            if vehicle in self.vehicles[vehicle.direction]:
+            if vehicle.direction in self.vehicles and vehicle in self.vehicles[vehicle.direction]:
                 self.vehicles[vehicle.direction].remove(vehicle)
+
+        return collided_vehicles, off_screen_vehicles
 
     def is_terminated(self):
         # e.g., if a major collision occurs
