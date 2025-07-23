@@ -4,6 +4,7 @@ import math
 
 class Simulation:
     def __init__(self, max_vehicles=20, render_mode=None):
+        self.render_mode = render_mode
 
         self.speeds = {'car': 2.25, 'bus': 1.8, 'truck': 1.8, 'bike': 2.5}
         self.x = {'right': 0, 'down': (700, 750), 'left': 1400, 'up': (600, 650)}

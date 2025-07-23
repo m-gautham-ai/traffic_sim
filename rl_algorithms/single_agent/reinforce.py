@@ -96,6 +96,7 @@ class PolicyNetwork(torch.nn.Module):
 def evaluate_policy(policy, env, eval_episodes=10):
     """Runs policy for eval_episodes and returns average reward."""
     total_reward = 0
+    policy.eval() # Set policy to evaluation mode
     for _ in range(eval_episodes):
         state, _ = env.reset()
         agent_id = list(state.keys())[0]
@@ -103,8 +104,8 @@ def evaluate_policy(policy, env, eval_episodes=10):
         episode_reward = 0
         
         for _ in range(1000): # Max steps per episode
-            # During evaluation, we can take the deterministic action (the mean)
-            action = policy.select_action(current_state) # Or a deterministic one
+            with torch.no_grad():
+                action = policy.select_action(current_state)
             next_state_dict, reward_dict, terminated, truncated, _ = env.step({agent_id: action})
             
             reward = reward_dict.get(agent_id, 0)
@@ -115,56 +116,108 @@ def evaluate_policy(policy, env, eval_episodes=10):
                 break
         total_reward += episode_reward
     
+    policy.train() # Set policy back to training mode
     return total_reward / eval_episodes
 
-# --- Main Training Script ---
-EVAL_FREQ = 25 # Evaluate every 25 episodes
-
-env = LanelessEnv(render_mode=None, max_vehicles=1)
-obs, _ = env.reset()
-
-# Get state and action dimensions from the environment
-agent_id = list(obs.keys())[0]
-state_dim = env.observation_space[agent_id].shape[0]
-action_dim = env.action_space[agent_id].shape[0]
-
-policy = PolicyNetwork(state_dim=state_dim, action_dim=action_dim)
-
-best_avg_reward = -np.inf
-
-for episode in range(1, 1001):
-    state, info = env.reset()
-    agent_id = list(state.keys())[0]
-    current_state = state[agent_id]
+def test_agent(model_path='best_reinforce_policy.pth'):
+    """Loads a trained policy and runs it in a rendered environment."""
+    print(f"Loading model from {model_path} and running in test mode...")
     
-    episode_reward = 0
+    # --- Initialize Environment and Policy ---
+    env = LanelessEnv(render_mode='human', max_vehicles=1)
+    obs, _ = env.reset()
     
-    for step in range(1000):
-        action = policy.select_action(current_state)
-        next_state_dict, reward_dict, terminated, truncated, info = env.step({agent_id: action})
+    agent_id = list(obs.keys())[0]
+    state_dim = env.observation_space[agent_id].shape[0]
+    action_dim = env.action_space[agent_id].shape[0]
+    
+    policy = PolicyNetwork(state_dim=state_dim, action_dim=action_dim)
+    
+    # Load the trained weights
+    try:
+        policy.load_state_dict(torch.load(model_path))
+        print("Model weights loaded successfully.")
+    except FileNotFoundError:
+        print(f"Error: Model file not found at {model_path}. Please train the model first.")
+        env.close()
+        return
+
+    policy.eval() # Set the policy to evaluation mode
+
+    # --- Run a Single Test Episode ---
+    # Use the state from the initial reset
+    current_state = obs[agent_id]
+    total_reward = 0
+    
+    for step in range(1500):
+        with torch.no_grad():
+            action = policy.select_action(current_state)
+        
+        next_state_dict, reward_dict, terminated, truncated, _ = env.step({agent_id: action})
         
         reward = reward_dict.get(agent_id, 0)
-        policy.rewards.append(reward)
-        episode_reward += reward
+        total_reward += reward
         
         current_state = next_state_dict.get(agent_id)
+        env.render()
+        
         if terminated or truncated or current_state is None:
+            print("Episode finished.")
             break
             
-    policy.update()
+    print(f"Test finished. Total reward: {total_reward:.2f}")
+    env.close()
 
-    print(f"Episode {episode} finished with reward {episode_reward:.2f}")
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description='Train or test the REINFORCE agent.')
+    parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'],
+                        help='Set to "train" to train the agent, or "test" to evaluate a saved model.')
+    args = parser.parse_args()
 
-    # --- Periodic Evaluation ---
-    if episode % EVAL_FREQ == 0:
-        avg_reward = evaluate_policy(policy, env)
-        print(f"---------------------------------------")
-        print(f"Evaluation after {episode} episodes: Average Reward: {avg_reward:.2f}")
-        print(f"---------------------------------------")
+    if args.mode == 'train':
+        # --- Main Training Script ---
+        EVAL_FREQ = 25
+        env = LanelessEnv(render_mode=None, max_vehicles=1)
+        obs, _ = env.reset()
+        
+        agent_id = list(obs.keys())[0]
+        state_dim = env.observation_space[agent_id].shape[0]
+        action_dim = env.action_space[agent_id].shape[0]
+        
+        policy = PolicyNetwork(state_dim=state_dim, action_dim=action_dim)
+        best_avg_reward = -np.inf
+        
+        for episode in range(1, 1001):
+            state, info = env.reset()
+            current_state = state[list(state.keys())[0]]
+            
+            for step in range(1000):
+                action = policy.select_action(current_state)
+                next_state_dict, reward_dict, terminated, truncated, info = env.step({list(state.keys())[0]: action})
+                
+                reward = reward_dict.get(list(state.keys())[0], 0)
+                policy.rewards.append(reward)
+                
+                current_state = next_state_dict.get(list(state.keys())[0])
+                if terminated or truncated or current_state is None:
+                    break
+            
+            policy.update()
 
-        if avg_reward > best_avg_reward:
-            best_avg_reward = avg_reward
-            torch.save(policy.state_dict(), 'best_reinforce_policy.pth')
-            print(f"*** New best model saved with average reward: {best_avg_reward:.2f} ***")
+            # --- Periodic Evaluation ---
+            if episode % EVAL_FREQ == 0:
+                avg_reward = evaluate_policy(policy, env)
+                print(f"---------------------------------------")
+                print(f"Episode {episode}: Average Reward over 10 episodes: {avg_reward:.2f}")
+                print(f"---------------------------------------")
 
-env.close()
+                if avg_reward > best_avg_reward:
+                    best_avg_reward = avg_reward
+                    torch.save(policy.state_dict(), 'best_reinforce_policy.pth')
+                    print(f"*** New best model saved with average reward: {best_avg_reward:.2f} ***")
+        
+        env.close()
+
+    elif args.mode == 'test':
+        test_agent()
