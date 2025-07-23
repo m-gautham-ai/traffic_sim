@@ -3,7 +3,8 @@ import pygame
 import math
 
 class Simulation:
-    def __init__(self, max_vehicles=20):
+    def __init__(self, max_vehicles=20, render_mode=None):
+
         self.speeds = {'car': 2.25, 'bus': 1.8, 'truck': 1.8, 'bike': 2.5}
         self.x = {'right': 0, 'down': (700, 750), 'left': 1400, 'up': (600, 650)}
         self.y = {'right': (350, 500), 'down': 0, 'left': (450, 500), 'up': 800}
@@ -22,7 +23,8 @@ class Simulation:
         self.next_vehicle_id = 0
 
         self.background = pygame.image.load('images/intersection.png')
-        self.font = pygame.font.Font(None, 30)
+        if render_mode == 'human':
+            self.font = pygame.font.Font(None, 30)
 
     def reset(self):
         self.vehicles = {direction: [] for direction in self.direction_numbers.values()}
@@ -128,14 +130,15 @@ class Simulation:
         return self.time_elapsed > 300
 
     def render(self, screen):
-        screen.blit(self.background, (0, 0))
-        for vehicle in self.sprites:
-            screen.blit(vehicle.image, vehicle.rect)
-        
-        time_text = self.font.render(f"Time: {self.time_elapsed:.2f}s", True, (0,0,0))
-        screen.blit(time_text, (1100, 50))
-        vehicle_count_text = self.font.render(f"Vehicles: {len(self.sprites)}", True, (0,0,0))
-        screen.blit(vehicle_count_text, (1100, 80))
+        if self.render_mode == 'human':
+            screen.blit(self.background, (0, 0))
+            for vehicle in self.sprites:
+                screen.blit(vehicle.image, vehicle.rect)
+            
+            time_text = self.font.render(f"Time: {self.time_elapsed:.2f}s", True, (0,0,0))
+            screen.blit(time_text, (1100, 50))
+            vehicle_count_text = self.font.render(f"Vehicles: {len(self.sprites)}", True, (0,0,0))
+            screen.blit(vehicle_count_text, (1100, 80))
 
 
 class Vehicle(pygame.sprite.Sprite):
