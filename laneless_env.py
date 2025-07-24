@@ -21,6 +21,9 @@ class LanelessEnv(gym.Env):
 
         # Action space: [acceleration, steering] for each vehicle
         self.action_space = spaces.Dict()
+
+    def get_graph(self):
+        return self.simulation.get_graph_observation()
         # Observation space: [speed, rel_x1, rel_y1, speed1, ...]
         self.observation_space = spaces.Dict()
 

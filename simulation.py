@@ -1,6 +1,8 @@
 import random
 import pygame
 import math
+import torch
+from torch_geometric.data import Data
 
 class Simulation:
     def __init__(self, max_vehicles=20, render_mode=None):
@@ -48,12 +50,15 @@ class Simulation:
         self.next_vehicle_id += 1
 
     def step(self, actions):
+        random_number = random.randint(1, 10)
+
         self.time_elapsed += 1 / 30 # Assuming 30 FPS
         self.frame_count += 1
 
         # Spawn new vehicles periodically
-        if self.frame_count % 30 == 0:
-            self.generate_vehicle()
+        if self.frame_count % 10 == 0 and random_number > 7 :
+            if len(self.sprites) < self.max_vehicles:
+                self.generate_vehicle()
 
         rewards = {}
         # Apply actions to vehicles
@@ -65,6 +70,10 @@ class Simulation:
 
         # --- Handle Collisions and Off-Screen Vehicles ---
         collided_vehicles, off_screen_vehicles = self._handle_collisions_and_offscreen()
+
+        # Replenish vehicles to maintain the max count
+        # while len(self.sprites) < self.max_vehicles:
+        #     self.generate_vehicle()
 
         # --- Calculate Rewards ---
         # Start with the base reward for all active vehicles
@@ -93,6 +102,51 @@ class Simulation:
             observations[vehicle.id] = vehicle.get_observation(self.sprites)
         return observations
 
+    def get_graph_observation(self):
+        vehicles = list(self.sprites)
+        if not vehicles:
+            return None
+
+        # 1. Node Features: [speed] for each vehicle
+        node_features = torch.tensor([[v.speed] for v in vehicles], dtype=torch.float32)
+
+        # Create a mapping from vehicle object to its index in the list
+        vehicle_to_idx = {v: i for i, v in enumerate(vehicles)}
+
+        # 2. Edge Index & Edge Features
+        edge_list = []
+        edge_features = []
+        sensor_range = 200  # Same as before
+
+        for i, vehicle1 in enumerate(vehicles):
+            for j, vehicle2 in enumerate(vehicles):
+                if i == j:
+                    continue
+                dist = math.sqrt((vehicle1.x - vehicle2.x)**2 + (vehicle1.y - vehicle2.y)**2)
+                if dist < sensor_range:
+                    # Add a directed edge from vehicle2 to vehicle1
+                    edge_list.append([j, i]) # Edge from neighbor j to self i
+                    
+                    # Add edge features (relative position)
+                    relative_x = (vehicle2.x - vehicle1.x) / sensor_range
+                    relative_y = (vehicle2.y - vehicle1.y) / sensor_range
+                    edge_features.append([relative_x, relative_y])
+
+        if not edge_list: # Handle case with no edges
+            edge_index = torch.empty((2, 0), dtype=torch.long)
+            edge_attr = torch.empty((0, 2), dtype=torch.float32)
+        else:
+            edge_index = torch.tensor(edge_list, dtype=torch.long).t().contiguous()
+            edge_attr = torch.tensor(edge_features, dtype=torch.float32)
+
+        # Create the PyG Data object
+        graph_data = Data(x=node_features, edge_index=edge_index, edge_attr=edge_attr)
+        
+        # We also need to know which vehicle corresponds to which node
+        graph_data.vehicle_ids = [v.id for v in vehicles]
+
+        return graph_data
+
     def _calculate_reward(self, vehicle):
         # TARGET_SPEED = 2.5
         # SAFE_DISTANCE = 60
@@ -109,15 +163,24 @@ class Simulation:
         #         if dist < SAFE_DISTANCE:
         #             proximity_penalty += -1.5 * (1 - (dist / SAFE_DISTANCE))
         
-        # return speed_reward + proximity_penalty + STEP_PENALTY
-        """
-        Calculates the reward for a vehicle at each step.
-        The main rewards (for success or failure) are handled in the `step` function.
-        This function provides a small penalty for each step taken to encourage efficiency.
-        """
+        TARGET_SPEED = 2.5
+        SAFE_DISTANCE = 50
+        STEP_PENALTY = -0.05 # A smaller penalty as other rewards are now active
         
-        STEP_PENALTY = -0.1  # To encourage finishing faster
-        return STEP_PENALTY
+        # 1. Speed reward: Encourages moving at a steady, safe speed.
+        speed_error = abs(vehicle.speed - TARGET_SPEED)
+        speed_reward = max(0, 1 - speed_error / TARGET_SPEED) # Normalized
+
+        # 2. Proximity penalty: Penalizes getting too close to other vehicles.
+        proximity_penalty = 0
+        for other_vehicle in self.sprites:
+            if vehicle is not other_vehicle:
+                dist = math.sqrt((vehicle.x - other_vehicle.x)**2 + (vehicle.y - other_vehicle.y)**2)
+                if dist < SAFE_DISTANCE:
+                    # Penalty increases quadratically as the vehicle gets closer
+                    proximity_penalty -= (1 - (dist / SAFE_DISTANCE))**2
+        
+        return speed_reward + proximity_penalty + STEP_PENALTY
 
     def _handle_collisions_and_offscreen(self):
         off_screen_vehicles = {v for v in self.sprites if not self.background.get_rect().colliderect(v.rect)}
@@ -152,7 +215,8 @@ class Simulation:
 
     def is_truncated(self):
         # e.g., if simulation time limit is reached
-        return self.time_elapsed > 300
+        # Truncate if the simulation runs for more than 300 steps (10 seconds)
+        return self.frame_count > 300
 
     def render(self, screen):
         if self.render_mode == 'human':
@@ -164,6 +228,9 @@ class Simulation:
             screen.blit(time_text, (1100, 50))
             vehicle_count_text = self.font.render(f"Vehicles: {len(self.sprites)}", True, (0,0,0))
             screen.blit(vehicle_count_text, (1100, 80))
+
+            frame_count_text = self.font.render(f"Frames: {self.frame_count}", True, (0,0,0))
+            screen.blit(frame_count_text, (1100, 110))
 
 
 class Vehicle(pygame.sprite.Sprite):
@@ -177,30 +244,35 @@ class Vehicle(pygame.sprite.Sprite):
         self.direction = direction
         self.crossed = 0
 
-        # Randomize starting position
-        if direction == 'right':
-            self.x = self.sim.x[direction]
-            self.y = random.randint(self.sim.y[direction][0], self.sim.y[direction][1])
-        elif direction == 'left':
-            self.x = self.sim.x[direction]
-            self.y = random.randint(self.sim.y[direction][0], self.sim.y[direction][1])
-
-        path = f"images/{direction}/{vehicle_class}.png"
+        # 1. Load image and get dimensions
+        path = f"images/{self.direction}/{self.vehicle_class}.png"
         self.image = pygame.image.load(path)
+        img_rect = self.image.get_rect()
 
-        # Prevent spawn overlap
-        if self.sim.vehicles[direction]:
-            last_vehicle = self.sim.vehicles[direction][-1]
+        # 2. Set initial position for 'right' direction
+        # Start at x=0 and find a random y in the correct lane
+        self.x = self.sim.x['right']
+        lane_min_y = self.sim.y['right'][0]
+        lane_max_y = self.sim.y['right'][1] - img_rect.height
+        self.y = random.randint(lane_min_y, lane_max_y)
+
+        # 3. Adjust for overlap with the last vehicle in the lane
+        if self.sim.vehicles['right']:
+            last_vehicle = self.sim.vehicles['right'][-1]
+            # If too close, place this vehicle behind the last one
             if self.is_too_close(last_vehicle):
-                if direction == 'right':
-                    self.x = last_vehicle.x - self.image.get_rect().width - self.sim.moving_gap
-                elif direction == 'left':
-                    self.x = last_vehicle.x + self.image.get_rect().width + self.sim.moving_gap
+                self.x = last_vehicle.x - img_rect.width - self.sim.moving_gap
 
-        self.sim.vehicles[direction].append(self)
+        # 4. Final clamp to ensure vehicle is fully on screen
+        screen_width = self.sim.background.get_rect().width
+        self.x = max(0, min(self.x, screen_width - img_rect.width))
+        self.y = max(lane_min_y, min(self.y, lane_max_y))
+
+        # 5. Add to simulation and create the render rectangle
+        self.sim.vehicles[self.direction].append(self)
         self.sim.sprites.add(self)
-
-        self.rect = self.image.get_rect(topleft=(self.x, self.y))
+        # Force cast to int to prevent any possibility of a TypeError
+        self.rect = img_rect.move(int(self.x), int(self.y))
 
     def is_too_close(self, other_vehicle):
         if self.direction in ['right', 'left']:
@@ -235,29 +307,51 @@ class Vehicle(pygame.sprite.Sprite):
         return own_observation + neighbor_observation
 
     def move(self, action):
+        acceleration, steering = action
+
+        # Update speed based on acceleration action
+        self.speed += acceleration * 0.5
+        self.speed = max(0, self.speed) # Cannot have negative speed
+
+        # Calculate potential new position
+        dx = 0
+        if self.direction == 'right':
+            dx = self.speed
+        elif self.direction == 'left':
+            dx = -self.speed
+        
+        next_x = self.x + dx
+
+        # Check for collision with vehicles in front
         can_move = True
         for other_vehicle in self.sim.vehicles[self.direction]:
             if self == other_vehicle: continue
-            
+
+            # Check if other_vehicle is in front of this one
             is_in_front = (self.direction == 'right' and self.x < other_vehicle.x) or \
                           (self.direction == 'left' and self.x > other_vehicle.x)
-            
-            if is_in_front and self.is_too_close(other_vehicle):
-                dist_x = abs(self.x - other_vehicle.x)
-                if dist_x < self.image.get_rect().width + self.sim.moving_gap:
+
+            if is_in_front:
+                # Calculate the distance if this vehicle moves
+                dist_if_move = abs(next_x - other_vehicle.x)
+                safe_dist = self.image.get_rect().width + self.sim.moving_gap
+                
+                if dist_if_move < safe_dist:
                     can_move = False
+                    self.speed = 0 # Stop if too close
                     break
-
-        acceleration, steering = action
-        self.speed += acceleration * 0.5
-        self.speed = max(0, self.speed)
-
+        
+        # Update position if movement is safe
         if can_move:
-            if self.direction == 'right': self.x += self.speed
-            elif self.direction == 'left': self.x -= self.speed
+            self.x = next_x
 
-            if self.direction in ['right', 'left']:
-                self.y += steering * 2
-                self.y = max(self.sim.y[self.direction][0], min(self.y, self.sim.y[self.direction][1]))
-            
-            self.rect.topleft = (self.x, self.y)
+        # Handle steering for horizontal movement
+        if self.direction in ['right', 'left']:
+            self.y += steering * 2
+            # Clamp y to its lane boundaries
+            min_y = self.sim.y[self.direction][0]
+            max_y = self.sim.y[self.direction][1] - self.image.get_rect().height
+            self.y = max(min_y, min(self.y, max_y))
+
+        # CRITICAL: Update the rect position after all calculations
+        self.rect.topleft = (self.x, self.y)
