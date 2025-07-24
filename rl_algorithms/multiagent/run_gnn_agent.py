@@ -12,7 +12,7 @@ def run_gnn_agent():
     # --- Parameters ---
     model_path = 'ppo_gnn_best.pth'
     num_episodes = 10
-    num_vehicles = 10
+    num_vehicles = 20
 
     # --- Initialization ---
     env = LanelessEnv(render_mode='human', max_vehicles=num_vehicles)

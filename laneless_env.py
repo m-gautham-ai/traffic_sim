@@ -7,7 +7,7 @@ from simulation import Simulation
 class LanelessEnv(gym.Env):
     metadata = {'render_modes': ['human'], 'render_fps': 30}
 
-    def __init__(self, render_mode=None, max_vehicles=20):
+    def __init__(self, render_mode=None, max_vehicles=20, evaluation_mode=False):
         super().__init__()
         self.render_mode = render_mode
 
@@ -17,15 +17,18 @@ class LanelessEnv(gym.Env):
             pygame.display.set_caption("Laneless Environment")
             self.clock = pygame.time.Clock()
 
-        self.simulation = Simulation(max_vehicles=max_vehicles, render_mode=render_mode)
+        self.simulation = Simulation(max_vehicles=max_vehicles, render_mode=render_mode, evaluation_mode=evaluation_mode)
 
         # Action space: [acceleration, steering] for each vehicle
         self.action_space = spaces.Dict()
 
     def get_graph(self):
-        return self.simulation.get_graph_observation()
-        # Observation space: [speed, rel_x1, rel_y1, speed1, ...]
-        self.observation_space = spaces.Dict()
+        graph_data = self.simulation.get_graph_observation()
+        if graph_data is None:
+            return None, {}
+        # The vehicle IDs are stored in the graph_data object. We create the map from it.
+        node_to_vehicle_map = {i: vid for i, vid in enumerate(graph_data.vehicle_ids)}
+        return graph_data, node_to_vehicle_map
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -44,7 +47,8 @@ class LanelessEnv(gym.Env):
         # Determine which agents are terminated or truncated
         terminated_ids = {v.id for v in collided_vehicles}.union({v.id for v in off_screen_vehicles})
         
-        terminated = {v.id: v.id in terminated_ids for v in self.simulation.sprites}
+        # In evaluation mode, the episode doesn't terminate until the step limit is reached
+        terminated = {v.id: self.simulation.is_terminated() or v.id in terminated_ids for v in self.simulation.sprites}
         truncated = {v.id: is_truncated_global for v in self.simulation.sprites}
 
         # An agent that is terminated should not also be truncated

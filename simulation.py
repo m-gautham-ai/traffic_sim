@@ -2,11 +2,13 @@ import random
 import pygame
 import math
 import torch
+import numpy as np
 from torch_geometric.data import Data
 
 class Simulation:
-    def __init__(self, max_vehicles=20, render_mode=None):
+    def __init__(self, max_vehicles=20, render_mode=None, evaluation_mode=False):
         self.render_mode = render_mode
+        self.evaluation_mode = evaluation_mode
 
         self.speeds = {'car': 2.25, 'bus': 1.8, 'truck': 1.8, 'bike': 2.5}
         self.x = {'right': 0, 'down': (700, 750), 'left': 1400, 'up': (600, 650)}
@@ -23,6 +25,7 @@ class Simulation:
         self.time_elapsed = 0
         self.frame_count = 0
         self.max_vehicles = max_vehicles
+        self.evaluation_mode = evaluation_mode
         self.next_vehicle_id = 0
 
         self.background = pygame.image.load('images/intersection.png')
@@ -30,24 +33,67 @@ class Simulation:
             self.font = pygame.font.Font(None, 30)
 
     def reset(self):
-        self.vehicles = {direction: [] for direction in self.direction_numbers.values()}
+        # Reset simulation state
         self.sprites.empty()
+        self.vehicles = {direction: [] for direction in self.direction_numbers.values()}
         self.time_elapsed = 0
         self.frame_count = 0
-        # Add some initial vehicles
-        for _ in range(5):
-            self.generate_vehicle()
+        self.next_vehicle_id = 0
+
+        # Deterministic initial placement for 'right' direction
+        direction = 'right'
+        direction_number = 0
+        lane_min_y = self.y[direction][0]
+        lane_max_y = self.y[direction][1]
+        available_height = lane_max_y - lane_min_y
+        
+        # Evenly space the vehicles within the lane
+        spacing = available_height / self.max_vehicles
+
+        for i in range(self.max_vehicles):
+            vehicle_type_idx = random.choice(self.allowed_vehicle_types_list)
+            vehicle_type = self.vehicle_types[vehicle_type_idx]
+            
+            # Calculate position
+            pos_x = self.x[direction]
+            pos_y = lane_min_y + (i * spacing)
+            initial_pos = (pos_x, pos_y)
+
+            Vehicle(self, self.next_vehicle_id, vehicle_type, direction_number, direction, initial_pos)
+            self.next_vehicle_id += 1
+
         return self.get_observation()
 
     def generate_vehicle(self):
-        if sum(len(v) for v in self.vehicles.values()) >= self.max_vehicles:
-            return
-        vehicle_type_idx = random.choice(self.allowed_vehicle_types_list)
-        vehicle_type = self.vehicle_types[vehicle_type_idx]
-        direction_number = random.choice(list(self.direction_numbers.keys()))
-        direction = self.direction_numbers[direction_number]
-        Vehicle(self, self.next_vehicle_id, vehicle_type, direction_number, direction)
-        self.next_vehicle_id += 1
+        min_spawn_distance = 40  # Pixels
+        max_attempts = 50
+
+        for _ in range(max_attempts):
+            # Randomly select vehicle properties
+            vehicle_type_idx = random.choice(self.allowed_vehicle_types_list)
+            vehicle_type = self.vehicle_types[vehicle_type_idx]
+            direction_number = 0  # Assuming 'right' direction
+            direction = 'right'
+
+            # Generate a candidate position
+            lane_min_y = self.y[direction][0]
+            lane_max_y = self.y[direction][1]
+            candidate_x = self.x[direction]
+            candidate_y = random.uniform(lane_min_y, lane_max_y)
+            candidate_pos = np.array([candidate_x, candidate_y])
+
+            # Check for safety
+            is_safe = True
+            for other_vehicle in self.sprites:
+                other_pos = np.array([other_vehicle.x, other_vehicle.y])
+                if np.linalg.norm(candidate_pos - other_pos) < min_spawn_distance:
+                    is_safe = False
+                    break
+            
+            if is_safe:
+                Vehicle(self, self.next_vehicle_id, vehicle_type, direction_number, direction, candidate_pos)
+                self.next_vehicle_id += 1
+                return  # Successfully spawned
 
     def step(self, actions):
         random_number = random.randint(1, 10)
@@ -56,7 +102,7 @@ class Simulation:
         self.frame_count += 1
 
         # Spawn new vehicles periodically
-        if self.frame_count % 10 == 0 and random_number > 7 :
+        if self.frame_count % 10 == 0 and random_number > 3 :
             if len(self.sprites) < self.max_vehicles:
                 self.generate_vehicle()
 
@@ -70,6 +116,11 @@ class Simulation:
 
         # --- Handle Collisions and Off-Screen Vehicles ---
         collided_vehicles, off_screen_vehicles = self._handle_collisions_and_offscreen()
+
+        # In evaluation mode, replenish vehicles to maintain the max count
+        # if self.evaluation_mode:
+        #     while len(self.sprites) < self.max_vehicles:
+        #         self.generate_vehicle()
 
         # Replenish vehicles to maintain the max count
         # while len(self.sprites) < self.max_vehicles:
@@ -210,7 +261,12 @@ class Simulation:
         return collided_vehicles, off_screen_vehicles
 
     def is_terminated(self):
-        # e.g., if a major collision occurs
+        # In evaluation mode, the simulation never terminates on its own
+        if self.evaluation_mode:
+            return False
+        
+        # In normal (training) mode, you might have termination conditions.
+        # For now, we assume termination is handled by the training script logic (e.g., on crash).
         return False
 
     def is_truncated(self):
@@ -234,7 +290,7 @@ class Simulation:
 
 
 class Vehicle(pygame.sprite.Sprite):
-    def __init__(self, simulation, vehicle_id, vehicle_class, direction_number, direction):
+    def __init__(self, simulation, vehicle_id, vehicle_class, direction_number, direction, initial_position):
         super().__init__()
         self.sim = simulation
         self.id = vehicle_id
@@ -243,35 +299,23 @@ class Vehicle(pygame.sprite.Sprite):
         self.direction_number = direction_number
         self.direction = direction
         self.crossed = 0
+        self.x, self.y = initial_position[0], initial_position[1]
 
         # 1. Load image and get dimensions
         path = f"images/{self.direction}/{self.vehicle_class}.png"
         self.image = pygame.image.load(path)
         img_rect = self.image.get_rect()
 
-        # 2. Set initial position for 'right' direction
-        # Start at x=0 and find a random y in the correct lane
-        self.x = self.sim.x['right']
+        # 2. Final clamp to ensure vehicle is fully on screen
+        screen_width = self.sim.background.get_rect().width
         lane_min_y = self.sim.y['right'][0]
         lane_max_y = self.sim.y['right'][1] - img_rect.height
-        self.y = random.randint(lane_min_y, lane_max_y)
-
-        # 3. Adjust for overlap with the last vehicle in the lane
-        if self.sim.vehicles['right']:
-            last_vehicle = self.sim.vehicles['right'][-1]
-            # If too close, place this vehicle behind the last one
-            if self.is_too_close(last_vehicle):
-                self.x = last_vehicle.x - img_rect.width - self.sim.moving_gap
-
-        # 4. Final clamp to ensure vehicle is fully on screen
-        screen_width = self.sim.background.get_rect().width
         self.x = max(0, min(self.x, screen_width - img_rect.width))
         self.y = max(lane_min_y, min(self.y, lane_max_y))
 
-        # 5. Add to simulation and create the render rectangle
+        # 3. Add to simulation and create the render rectangle
         self.sim.vehicles[self.direction].append(self)
         self.sim.sprites.add(self)
-        # Force cast to int to prevent any possibility of a TypeError
         self.rect = img_rect.move(int(self.x), int(self.y))
 
     def is_too_close(self, other_vehicle):
