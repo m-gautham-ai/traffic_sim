@@ -22,8 +22,10 @@ class LanelessEnv(gym.Env):
         # Action space: [acceleration, steering] for each vehicle
         self.action_space = spaces.Dict()
 
-    def get_graph(self):
-        graph_data = self.simulation.get_graph_observation()
+    def get_graph(self, obs):
+        # Get vehicle objects from the observation dictionary keys
+        vehicles = [v for v in self.simulation.sprites if v.id in obs]
+        graph_data = self.simulation.get_graph_observation(vehicles)
         if graph_data is None:
             return None, {}
         # The vehicle IDs are stored in the graph_data object. We create the map from it.
@@ -56,7 +58,7 @@ class LanelessEnv(gym.Env):
             if agent_id in truncated:
                 truncated[agent_id] = False
 
-        return obs, rewards, terminated, truncated, self._get_info()
+        return obs, rewards, collided_vehicles, off_screen_vehicles, is_truncated_global
 
     def render(self):
         if self.render_mode == 'human':

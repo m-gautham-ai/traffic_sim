@@ -17,7 +17,7 @@ class Simulation:
         self.direction_numbers = {0: 'right'}
         self.default_stop = {'right': 580, 'down': 320, 'left': 810, 'up': 545}
         self.moving_gap = 25
-        self.allowed_vehicle_types = {'car': True, 'bus': True, 'truck': True, 'bike': True}
+        self.allowed_vehicle_types = {'car': True, 'bus': False, 'truck': False, 'bike': True}
         self.allowed_vehicle_types_list = [i for i, v in enumerate(self.allowed_vehicle_types.values()) if v]
 
         self.vehicles = {direction: [] for direction in self.direction_numbers.values()}
@@ -43,8 +43,8 @@ class Simulation:
         # Deterministic initial placement for 'right' direction
         direction = 'right'
         direction_number = 0
-        lane_min_y = self.y[direction][0]
-        lane_max_y = self.y[direction][1]
+        lane_min_y = 350 # Start of the road
+        lane_max_y = 600 # End of the road
         available_height = lane_max_y - lane_min_y
         
         # Evenly space the vehicles within the lane
@@ -137,7 +137,7 @@ class Simulation:
 
         # Apply large reward for finishing
         for vehicle in off_screen_vehicles:
-            rewards[vehicle.id] = 100  # Large reward for successfully exiting
+            rewards[vehicle.id] = 200  # Increased reward for successfully exiting
 
         # --- Finalize Step ---
         observation = self.get_observation()
@@ -153,7 +153,7 @@ class Simulation:
             observations[vehicle.id] = vehicle.get_observation(self.sprites)
         return observations
 
-    def get_graph_observation(self):
+    def get_graph_observation(self, vehicles=None):
         vehicles = list(self.sprites)
         if not vehicles:
             return None
@@ -214,15 +214,18 @@ class Simulation:
         #         if dist < SAFE_DISTANCE:
         #             proximity_penalty += -1.5 * (1 - (dist / SAFE_DISTANCE))
         
-        TARGET_SPEED = 2.5
+        TARGET_SPEED = 3.5  # Further increased target speed
         SAFE_DISTANCE = 50
-        STEP_PENALTY = -0.05 # A smaller penalty as other rewards are now active
-        
-        # 1. Speed reward: Encourages moving at a steady, safe speed.
-        speed_error = abs(vehicle.speed - TARGET_SPEED)
-        speed_reward = max(0, 1 - speed_error / TARGET_SPEED) # Normalized
+        STEP_PENALTY = -0.01
 
-        # 2. Proximity penalty: Penalizes getting too close to other vehicles.
+        # 1. Aggressive Speed Reward: Strongly incentivize hitting the target speed.
+        speed_error = abs(vehicle.speed - TARGET_SPEED)
+        speed_reward = max(0, 1 - speed_error / TARGET_SPEED) * 1.0 # Increased multiplier
+
+        # 2. Aggressive Forward Movement Reward: Make progress the primary objective.
+        forward_reward = vehicle.speed * 0.4 # Increased multiplier
+
+        # 3. Proximity penalty: Penalizes getting too close to other vehicles.
         proximity_penalty = 0
         for other_vehicle in self.sprites:
             if vehicle is not other_vehicle:
@@ -230,8 +233,8 @@ class Simulation:
                 if dist < SAFE_DISTANCE:
                     # Penalty increases quadratically as the vehicle gets closer
                     proximity_penalty -= (1 - (dist / SAFE_DISTANCE))**2
-        
-        return speed_reward + proximity_penalty + STEP_PENALTY
+
+        return speed_reward + forward_reward + proximity_penalty + STEP_PENALTY
 
     def _handle_collisions_and_offscreen(self):
         off_screen_vehicles = {v for v in self.sprites if not self.background.get_rect().colliderect(v.rect)}
@@ -351,7 +354,8 @@ class Vehicle(pygame.sprite.Sprite):
         return own_observation + neighbor_observation
 
     def move(self, action):
-        acceleration, steering = action
+        # The action is a single value representing acceleration
+        acceleration = action
 
         # Update speed based on acceleration action
         self.speed += acceleration * 0.5
@@ -389,13 +393,7 @@ class Vehicle(pygame.sprite.Sprite):
         if can_move:
             self.x = next_x
 
-        # Handle steering for horizontal movement
-        if self.direction in ['right', 'left']:
-            self.y += steering * 2
-            # Clamp y to its lane boundaries
-            min_y = self.sim.y[self.direction][0]
-            max_y = self.sim.y[self.direction][1] - self.image.get_rect().height
-            self.y = max(min_y, min(self.y, max_y))
+
 
         # CRITICAL: Update the rect position after all calculations
         self.rect.topleft = (self.x, self.y)
