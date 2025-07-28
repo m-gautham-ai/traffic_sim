@@ -161,7 +161,7 @@ class RolloutBuffer:
 
 def evaluate_ppo(policy,eval_episodes=10, max_eval_steps=1000) : 
   # --- Initialization ---
-    max_vehicles = 10
+    max_vehicles = 15
     total_timesteps = 500000
     env = LanelessEnv(render_mode=None, max_vehicles=max_vehicles)
 
@@ -188,7 +188,7 @@ def evaluate_ppo(policy,eval_episodes=10, max_eval_steps=1000) :
             print("No vehicles on screen. Stepping with no actions...")
             # total_steps += 1 # This is an environment step
             next_obs, _, _, _, _ = env.step({}) # Step with no actions
-            graph_data, node_to_vehicle_map = env.get_graph()
+            graph_data, node_to_vehicle_map = env.get_graph(next_obs)
 
         dist, value = policy(graph_data)
         action_tensor = dist.sample()
