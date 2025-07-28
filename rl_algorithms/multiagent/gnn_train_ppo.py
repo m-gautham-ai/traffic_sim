@@ -23,6 +23,9 @@ VALUE_LR = 1e-3
 BATCH_SIZE = 2048 # Number of steps to collect before updating
 MINI_BATCH_SIZE = 256 # Size of mini-batches for PPO update
 EPOCHS_PER_UPDATE = 10
+MAX_VEHICLES_EVAL = 15
+MAX_VEHICLES_TRAIN = 15
+MAX_EVAL_STEPS = 10000
 
 class RolloutBuffer:
     def __init__(self):
@@ -159,23 +162,16 @@ class RolloutBuffer:
 
 # --- Evaluation Function ---
 
-def evaluate_ppo(policy,eval_episodes=10, max_eval_steps=1000) : 
+def evaluate_ppo(policy,eval_episodes=10, max_eval_steps=MAX_EVAL_STEPS) : 
   # --- Initialization ---
-    max_vehicles = 15
-    total_timesteps = 500000
-    env = LanelessEnv(render_mode=None, max_vehicles=max_vehicles)
+    env = LanelessEnv(render_mode=None, max_vehicles=MAX_VEHICLES_EVAL)
+
 
     total_steps = 0
-    update_count = 0
     # Ensure the initial state is not empty
     obs, _ = env.reset()
     graph_data, _ = env.get_graph(obs)
-    # while graph_data is None or graph_data.num_nodes == 0:
-    #     print("Initial state is empty, resetting again...")
-    #     # obs, _ = env.reset()
-    #     graph_data, _ = env.get_graph()
     best_avg_reward = -float('inf')
-    max_visible_vehicles = 0
     final_rewards_dict = {}
     vehicle_ids_done_dict = {}
     total_crashes = 0
@@ -222,7 +218,7 @@ def evaluate_ppo(policy,eval_episodes=10, max_eval_steps=1000) :
 
 def train_ppo():
     # --- Initialization ---
-    max_vehicles = 10
+    max_vehicles = MAX_VEHICLES_TRAIN
     total_timesteps = 100000
     EVAL_INTERVAL = 2 # Evaluate every 2 updates
     env = LanelessEnv(render_mode=None, max_vehicles=max_vehicles)
@@ -237,10 +233,6 @@ def train_ppo():
     # Ensure the initial state is not empty
     obs, _ = env.reset()
     graph_data, _ = env.get_graph(obs)
-    # while graph_data is None or graph_data.num_nodes == 0:
-    #     print("Initial state is empty, resetting again...")
-    #     # obs, _ = env.reset()
-    #     graph_data, _ = env.get_graph()
     best_avg_reward = -float('inf')
     max_visible_vehicles = 0
 
@@ -341,7 +333,7 @@ def train_ppo():
         # --- Evaluate Policy ---
         if update_count > 0 and update_count % EVAL_INTERVAL == 0:
             eval_count += 1
-            avg_reward, total_crashes, total_successes = evaluate_ppo(policy)
+            avg_reward, total_crashes, total_successes = evaluate_ppo(policy, max_eval_steps=10000)
             print("Avg. Reward: ", avg_reward)
             writer.add_scalar('Evaluation/AverageReward', avg_reward, eval_count)
             writer.add_scalar('Evaluation/TotalCrashes', total_crashes, eval_count)
