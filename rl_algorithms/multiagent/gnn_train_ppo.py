@@ -156,41 +156,7 @@ class RolloutBuffer:
         self.returns = []
 
 # --- Evaluation Function ---
-def evaluate_policy(policy, eval_episodes=10, max_eval_steps=1000):
-    eval_env = LanelessEnv(render_mode=None, max_vehicles=10)
-    total_rewards = []
 
-    for _ in range(eval_episodes):
-        obs, _ = eval_env.reset()
-        episode_reward = 0
-
-        for step in range(max_eval_steps):
-            if not obs: # End episode if no vehicles are left
-                break
-
-            graph_data, node_to_vehicle_map = eval_env.get_graph(obs)
-            if not graph_data or graph_data.num_nodes == 0:
-                break
-
-            with torch.no_grad():
-                # Use deterministic actions for evaluation by taking the mean of the distribution
-                dist, _ = policy(graph_data)
-                action_tensor = dist.mean
-            
-            actions_dict = {node_to_vehicle_map[i]: act.cpu().numpy() for i, act in enumerate(action_tensor)}
-            next_obs, rewards, terminated, off_screen, is_truncated = eval_env.step(actions_dict)
-
-            # Collect the sum of rewards for all vehicles in the step
-            episode_reward += sum(rewards.values())
-
-            obs = next_obs
-
-            if is_truncated:
-                break
-        
-        total_rewards.append(episode_reward)
-
-    return np.mean(total_rewards)
 def evaluate_ppo(policy,eval_episodes=10, max_eval_steps=1000) : 
   # --- Initialization ---
     max_vehicles = 10
@@ -231,7 +197,7 @@ def evaluate_ppo(policy,eval_episodes=10, max_eval_steps=1000) :
             final_rewards_dict[vid] = final_rewards_dict.get(vid, 0.0) + reward
 
         for vid in terminated_vehicles:
-            final_rewards_dict[vid] = final_rewards_dict.get(vid, 0.0) + -20.0
+            final_rewards_dict[vid] = final_rewards_dict.get(vid, 0.0) + -50.0
             vehicle_ids_done_dict[vid] = True
 
         for vid in off_screen_vehicles:
