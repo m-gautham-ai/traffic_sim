@@ -7,6 +7,8 @@ import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
 from collections import defaultdict
+from torch.utils.tensorboard import SummaryWriter
+import time
 
 from laneless_env import LanelessEnv
 from gnn_policy import ActorCriticGNN
@@ -160,7 +162,7 @@ class RolloutBuffer:
 def evaluate_ppo(policy,eval_episodes=10, max_eval_steps=1000) : 
   # --- Initialization ---
     max_vehicles = 10
-    total_timesteps = 10000
+    total_timesteps = 500000
     env = LanelessEnv(render_mode=None, max_vehicles=max_vehicles)
 
     total_steps = 0
@@ -176,10 +178,10 @@ def evaluate_ppo(policy,eval_episodes=10, max_eval_steps=1000) :
     max_visible_vehicles = 0
     final_rewards_dict = {}
     vehicle_ids_done_dict = {}
+    total_crashes = 0
+    total_successes = 0
     while total_steps < max_eval_steps:
         # --- Collect Experience --- #
-        total_crashes = 0
-        total_successes = 0
         graph_data, node_to_vehicle_map = env.get_graph(obs)
 
         while graph_data is None or graph_data.num_nodes == 0:
@@ -216,17 +218,19 @@ def evaluate_ppo(policy,eval_episodes=10, max_eval_steps=1000) :
     for vid in vehicle_ids_done_dict:
         my_reward += final_rewards_dict[vid]
     print ( "The total reward is: ", my_reward/len(vehicle_ids_done_dict.keys()))
-    return my_reward/len(vehicle_ids_done_dict.keys())
+    return my_reward/len(vehicle_ids_done_dict.keys()), total_crashes, total_successes
 
 def train_ppo():
     # --- Initialization ---
     max_vehicles = 10
     total_timesteps = 100000
-    EVAL_INTERVAL = 2 # Evaluate every 5 updates
+    EVAL_INTERVAL = 2 # Evaluate every 2 updates
     env = LanelessEnv(render_mode=None, max_vehicles=max_vehicles)
     policy = ActorCriticGNN(node_feature_dim=1, action_dim=1)
     optimizer = optim.Adam(policy.parameters(), lr=POLICY_LR)
     buffer = RolloutBuffer()
+    eval_count = 0
+    writer = SummaryWriter(f"runs/ppo_gnn_{int(time.time())}")
 
     total_steps = 0
     update_count = 0
@@ -253,7 +257,7 @@ def train_ppo():
                 print("No vehicles on screen. Stepping with no actions...")
                 total_steps += 1 # This is an environment step
                 next_obs, _, _, _, _ = env.step({}) # Step with no actions
-                graph_data, node_to_vehicle_map = env.get_graph()
+                graph_data, node_to_vehicle_map = env.get_graph(next_obs)
 
             with torch.no_grad():
                 dist, value = policy(graph_data)
@@ -336,12 +340,18 @@ def train_ppo():
 
         # --- Evaluate Policy ---
         if update_count > 0 and update_count % EVAL_INTERVAL == 0:
-            avg_reward = evaluate_ppo(policy)
+            eval_count += 1
+            avg_reward, total_crashes, total_successes = evaluate_ppo(policy)
             print("Avg. Reward: ", avg_reward)
+            writer.add_scalar('Evaluation/AverageReward', avg_reward, eval_count)
+            writer.add_scalar('Evaluation/TotalCrashes', total_crashes, eval_count)
+            writer.add_scalar('Evaluation/TotalSuccesses', total_successes, eval_count)
             if avg_reward > best_avg_reward:
                 best_avg_reward = avg_reward
                 torch.save(policy.state_dict(), 'ppo_gnn_best.pth')
                 print("New best PPO model saved with avg reward ", best_avg_reward)
+    
+    writer.close()
 
 if __name__ == '__main__':
     train_ppo()
