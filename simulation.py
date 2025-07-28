@@ -185,7 +185,8 @@ class Simulation:
             return None
 
         # 1. Node Features: [speed] for each vehicle
-        node_features = torch.tensor([[v.speed] for v in vehicles], dtype=torch.float32)
+        speeds = [v.speed.item() if hasattr(v.speed, 'item') else v.speed for v in vehicles]
+        node_features = torch.tensor([[s] for s in speeds], dtype=torch.float32)
 
         # Create a mapping from vehicle object to its index in the list
         vehicle_to_idx = {v: i for i, v in enumerate(vehicles)}
@@ -201,13 +202,10 @@ class Simulation:
                     continue
                 dist = math.sqrt((vehicle1.x - vehicle2.x)**2 + (vehicle1.y - vehicle2.y)**2)
                 if dist < sensor_range:
-                    # Add a directed edge from vehicle2 to vehicle1
                     edge_list.append([j, i]) # Edge from neighbor j to self i
-                    
-                    # Add edge features (relative position)
-                    relative_x = (vehicle2.x - vehicle1.x) / sensor_range
-                    relative_y = (vehicle2.y - vehicle1.y) / sensor_range
-                    edge_features.append([relative_x, relative_y])
+                    relative_speed = vehicle1.speed - vehicle2.speed
+                    scalar_relative_speed = relative_speed.item() if hasattr(relative_speed, 'item') else relative_speed
+                    edge_features.append([dist, scalar_relative_speed])
 
         if not edge_list: # Handle case with no edges
             edge_index = torch.empty((2, 0), dtype=torch.long)
@@ -381,7 +379,7 @@ class Vehicle(pygame.sprite.Sprite):
 
     def move(self, action):
         # The action is a single value representing acceleration
-        acceleration = action
+        acceleration = action.item() if hasattr(action, 'item') else action
 
         # Update speed based on acceleration action
         self.speed += acceleration * 0.5
