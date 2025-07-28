@@ -23,8 +23,8 @@ VALUE_LR = 1e-3
 BATCH_SIZE = 2048 # Number of steps to collect before updating
 MINI_BATCH_SIZE = 256 # Size of mini-batches for PPO update
 EPOCHS_PER_UPDATE = 10
-MAX_VEHICLES_EVAL = 15
-MAX_VEHICLES_TRAIN = 15
+MAX_VEHICLES_EVAL = 10
+MAX_VEHICLES_TRAIN = 10
 MAX_EVAL_STEPS = 10000
 
 class RolloutBuffer:
