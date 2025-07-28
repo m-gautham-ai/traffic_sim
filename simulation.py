@@ -139,6 +139,32 @@ class Simulation:
         for vehicle in off_screen_vehicles:
             rewards[vehicle.id] = 200  # Increased reward for successfully exiting
 
+        # --- Reward Shaping ---
+        for vehicle in self.sprites:
+            # 1. Survival bonus
+            survival_bonus = 0.01
+            # 2. Speed reward (encourage forward movement)
+            speed_reward = vehicle.speed * 0.01
+            # 3. Control penalty (penalize extreme actions)
+            action_taken = actions.get(vehicle.id, 0.0)
+            control_penalty = -0.01 * (action_taken**2)
+
+            # Check if vehicle id is already in rewards (from crash/success)
+            if vehicle.id in rewards:
+                rewards[vehicle.id] += survival_bonus + speed_reward + control_penalty
+            else:
+                rewards[vehicle.id] = survival_bonus + speed_reward + control_penalty
+
+        # 4. Near-miss penalty
+        for vehicle1 in self.sprites:
+            for vehicle2 in self.sprites:
+                if vehicle1 is vehicle2:
+                    continue
+                distance = pygame.math.Vector2(vehicle1.rect.center).distance_to(pygame.math.Vector2(vehicle2.rect.center))
+                if distance < vehicle1.rect.width * 1.5: # If vehicles are within 1.5 car lengths
+                    if vehicle1.id in rewards: rewards[vehicle1.id] -= 0.1
+                    if vehicle2.id in rewards: rewards[vehicle2.id] -= 0.1
+
         # --- Finalize Step ---
         observation = self.get_observation()
         is_truncated_global = self.is_truncated()

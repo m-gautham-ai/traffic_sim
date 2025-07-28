@@ -39,7 +39,11 @@ class ActorCriticGNN_MAPPO(nn.Module):
         self.actor_log_std = nn.Parameter(torch.zeros(1, action_dim))
 
         # Critic Head (Centralized)
-        self.critic_fc = nn.Linear(128, 1)
+        self.critic_fc = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
+        )
 
     def forward(self, data):
         x, edge_index, batch = data.x, data.edge_index, data.batch
@@ -149,7 +153,7 @@ def evaluate_mappo(policy, device, eval_episodes=10, max_eval_steps=MAX_EVAL_STE
             if total_steps >= max_eval_steps: break
 
             dist, _ = policy(graph_data.to(device))
-            action_tensor = dist.sample()
+            action_tensor = dist.mean
             
             actions_dict = {node_to_vehicle_map[i]: action_tensor[i].item() for i in range(action_tensor.size(0))}
             next_obs, rewards_dict, terminated_vehicles, off_screen_vehicles, is_truncated = env.step(actions_dict)
@@ -255,7 +259,7 @@ def train_mappo():
                 actor_loss = -torch.min(surr1, surr2).mean()
 
                 entropy = dist.entropy().mean()
-                loss = actor_loss + 0.5 * critic_loss - 0.01 * entropy
+                loss = actor_loss + 0.5 * critic_loss - 0.05 * entropy
 
                 optimizer.zero_grad()
                 loss.backward()

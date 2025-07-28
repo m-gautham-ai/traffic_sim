@@ -18,7 +18,7 @@ from torch_geometric.data import Batch
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
 CLIP_EPSILON = 0.2
-POLICY_LR = 3e-4
+POLICY_LR = 5e-4
 VALUE_LR = 1e-3
 BATCH_SIZE = 2048 # Number of steps to collect before updating
 MINI_BATCH_SIZE = 256 # Size of mini-batches for PPO update
@@ -195,11 +195,11 @@ def evaluate_ppo(policy,eval_episodes=10, max_eval_steps=MAX_EVAL_STEPS) :
             final_rewards_dict[vid] = final_rewards_dict.get(vid, 0.0) + reward
 
         for vid in terminated_vehicles:
-            final_rewards_dict[vid] = final_rewards_dict.get(vid, 0.0) + -50.0
+            final_rewards_dict[vid] = final_rewards_dict.get(vid, 0.0) 
             vehicle_ids_done_dict[vid] = True
 
         for vid in off_screen_vehicles:
-            final_rewards_dict[vid] = final_rewards_dict.get(vid, 0.0) + 10.0
+            final_rewards_dict[vid] = final_rewards_dict.get(vid, 0.0) 
             vehicle_ids_done_dict[vid] = True
         
         total_crashes += len(terminated_vehicles)
