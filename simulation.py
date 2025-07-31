@@ -4,6 +4,7 @@ import math
 import torch
 import numpy as np
 from torch_geometric.data import Data
+from scipy.optimize import minimize
 
 class Simulation:
     def __init__(self, max_vehicles=20, render_mode=None, evaluation_mode=False):
@@ -25,6 +26,7 @@ class Simulation:
         self.time_elapsed = 0
         self.frame_count = 0
         self.max_vehicles = max_vehicles
+        self.road_width = 150 # y-range for 'right' direction (500-350)
         self.evaluation_mode = evaluation_mode
         self.next_vehicle_id = 0
 
@@ -95,6 +97,29 @@ class Simulation:
                 self.next_vehicle_id += 1
                 return  # Successfully spawned
 
+    def nonlinear_width_objective(self, w, w_desired, priorities, delays, alpha=1.0, beta=0.1, gamma=0.05, epsilon=1e-6):
+        # Proportional Fairness: maximize sum(log(w)) -> minimize -sum(log(w))
+        log_fairness_cost = -np.sum(np.log(w + epsilon))
+        # Cost from deviation from desired width
+        # EXP/PF Rule: Weight deviation cost by an exponential of the delay
+        # This heavily prioritizes vehicles that have been waiting longer.
+        delay_weight = np.exp(beta * delays)
+        deviation_cost = np.sum(priorities * delay_weight * ((w - w_desired) / w_desired) ** 2)
+
+        # Entropy-based penalty for equitable distribution based on priority
+        # This encourages the width distribution to match the priority distribution.
+        total_width = np.sum(w)
+        p_w = w / (total_width + epsilon)
+
+        total_priority = np.sum(priorities)
+        p_prio = priorities / (total_priority + epsilon)
+
+        # KL-divergence: D_KL(p_w || p_prio) = sum(p_w * log(p_w / p_prio))
+        # We want to minimize this divergence.
+        entropy_penalty = np.sum(p_w * (np.log(p_w + epsilon) - np.log(p_prio + epsilon)))
+
+        return deviation_cost + alpha * log_fairness_cost + gamma * entropy_penalty
+
     def step(self, actions):
         random_number = random.randint(1, 10)
 
@@ -113,6 +138,32 @@ class Simulation:
         for vehicle_id, action in actions.items():
             if vehicle_id in vehicle_map:
                 vehicle_map[vehicle_id].move(action)
+
+        # --- Nonlinear Width Allocation ---
+        active_vehicles = list(self.sprites)
+        if active_vehicles:
+            num_vehicles = len(active_vehicles)
+            w_desired = np.full(num_vehicles, 2.0) # Desired width of 2.0 for all
+            priorities = np.array([v.priority for v in active_vehicles])
+            delays = np.array([self.frame_count - v.creation_time for v in active_vehicles])
+
+            # Define bounds and constraints for the optimization
+            bounds = [(0.5, 5.0) for _ in range(num_vehicles)]
+            constraints = {'type': 'eq', 'fun': lambda w: np.sum(w) - self.road_width}
+
+            # Run optimization
+            result = minimize(
+                self.nonlinear_width_objective, 
+                np.array([v.width for v in active_vehicles]), 
+                args=(w_desired, priorities, delays, 1.0, 0.1, 0.05),
+                method='SLSQP', 
+                bounds=bounds, 
+                constraints=constraints
+            )
+
+            if result.success:
+                for i, vehicle in enumerate(active_vehicles):
+                    vehicle.width = result.x[i]
 
         # --- Handle Collisions and Off-Screen Vehicles ---
         collided_vehicles, off_screen_vehicles = self._handle_collisions_and_offscreen()
@@ -184,9 +235,9 @@ class Simulation:
         if not vehicles:
             return None
 
-        # 1. Node Features: [speed] for each vehicle
-        speeds = [v.speed.item() if hasattr(v.speed, 'item') else v.speed for v in vehicles]
-        node_features = torch.tensor([[s] for s in speeds], dtype=torch.float32)
+        # 1. Node Features: [speed, width] for each vehicle
+        features = [[v.speed.item() if hasattr(v.speed, 'item') else v.speed, v.width] for v in vehicles]
+        node_features = torch.tensor(features, dtype=torch.float32)
 
         # Create a mapping from vehicle object to its index in the list
         vehicle_to_idx = {v: i for i, v in enumerate(vehicles)}
@@ -323,10 +374,13 @@ class Vehicle(pygame.sprite.Sprite):
         self.id = vehicle_id
         self.vehicle_class = vehicle_class
         self.speed = self.sim.speeds[vehicle_class]
+        self.priority = {'bus': 3, 'truck': 2, 'car': 1, 'bike': 1}.get(vehicle_class, 1)
         self.direction_number = direction_number
         self.direction = direction
+        self.creation_time = self.sim.frame_count
         self.crossed = 0
         self.x, self.y = initial_position[0], initial_position[1]
+        self.width = 2.0 # Default width
 
         # 1. Load image and get dimensions
         path = f"images/{self.direction}/{self.vehicle_class}.png"
