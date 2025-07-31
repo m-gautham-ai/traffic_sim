@@ -84,6 +84,9 @@ class LanelessEnv(gym.Env):
     def _get_info(self):
         return {v.id: {} for v in self.simulation.sprites}
 
+    def get_safety_violations(self):
+        return self.simulation.get_safety_violations()
+
     def close(self):
         if self.render_mode == 'human':
             pygame.quit()

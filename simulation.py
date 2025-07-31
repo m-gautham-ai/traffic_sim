@@ -7,6 +7,17 @@ from torch_geometric.data import Data
 from scipy.optimize import minimize
 
 class Simulation:
+    def get_safety_violations(self, min_separation_factor=1.5):
+        violating_vehicles = set()
+        vehicle_list = self.sprites.sprites()
+        for i in range(len(vehicle_list)):
+            for j in range(i + 1, len(vehicle_list)):
+                v1 = vehicle_list[i]
+                v2 = vehicle_list[j]
+                if v1.is_too_close(v2):
+                    violating_vehicles.add(v1.id)
+                    violating_vehicles.add(v2.id)
+        return violating_vehicles
     def __init__(self, max_vehicles=20, render_mode=None, evaluation_mode=False):
         self.render_mode = render_mode
         self.evaluation_mode = evaluation_mode

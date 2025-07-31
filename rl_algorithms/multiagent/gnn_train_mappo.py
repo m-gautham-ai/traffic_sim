@@ -1,4 +1,5 @@
 import sys
+import numpy as np
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
@@ -10,7 +11,34 @@ from torch_geometric.nn import GCNConv, global_mean_pool
 from torch_geometric.data import Data, Batch
 from torch.distributions import Normal
 from torch.utils.tensorboard import SummaryWriter
-import numpy as np
+
+def calculate_theil_index(rewards):
+    """Calculates the Theil index for a list of rewards."""
+    rewards = np.array(rewards, dtype=np.float64)
+    n = len(rewards)
+    if n < 2:
+        return 0.0
+
+    # Shift rewards to be non-negative for Theil index calculation
+    min_reward = np.min(rewards)
+    if min_reward < 0:
+        rewards += -min_reward
+
+    mean_reward = np.mean(rewards)
+    if mean_reward == 0:
+        return 0.0
+
+    # Theil's T Index - with protection against log(0)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        # Add a small epsilon to the argument of log to avoid log(0)
+        log_term = np.log((rewards / mean_reward) + 1e-9)
+        term = (rewards / mean_reward) * log_term
+        term[np.isnan(term)] = 0 # Replace NaNs resulting from 0 * log(0)
+        theil_index = np.sum(term) / n
+
+    return theil_index if not np.isnan(theil_index) else 0.0
+
+
 import time
 
 from laneless_env import LanelessEnv
@@ -133,21 +161,21 @@ def evaluate_mappo(policy, device, eval_episodes=10, max_eval_steps=MAX_EVAL_STE
     policy.eval() # Set the policy to evaluation mode
     env = LanelessEnv(render_mode=None, max_vehicles=MAX_VEHICLES_EVAL)
     total_steps = 0
-    obs, _ = env.reset()
-    
-    final_rewards_dict = {}
     vehicle_ids_done_dict = {}
+    final_rewards_dict = {}
     total_crashes = 0
     total_successes = 0
+    total_violating_vehicles = set()
+    start_time = time.time()
 
+    obs, _ = env.reset()
     with torch.no_grad(): # Disable gradient calculations for evaluation
         while total_steps < max_eval_steps:
             graph_data, node_to_vehicle_map = env.get_graph(obs)
 
             while graph_data is None or graph_data.num_nodes == 0:
                 next_obs, _, _, _, _ = env.step({})
-                obs = next_obs
-                graph_data, node_to_vehicle_map = env.get_graph(obs)
+                graph_data, node_to_vehicle_map = env.get_graph(next_obs)
                 total_steps += 1
                 if total_steps >= max_eval_steps: break
             if total_steps >= max_eval_steps: break
@@ -157,6 +185,8 @@ def evaluate_mappo(policy, device, eval_episodes=10, max_eval_steps=MAX_EVAL_STE
             
             actions_dict = {node_to_vehicle_map[i]: action_tensor[i].item() for i in range(action_tensor.size(0))}
             next_obs, rewards_dict, terminated_vehicles, off_screen_vehicles, is_truncated = env.step(actions_dict)
+
+            total_violating_vehicles.update(env.get_safety_violations())
 
             for vid in terminated_vehicles:
                 if vid not in vehicle_ids_done_dict:
@@ -173,9 +203,20 @@ def evaluate_mappo(policy, device, eval_episodes=10, max_eval_steps=MAX_EVAL_STE
             obs = next_obs
             total_steps += 1
 
+    end_time = time.time()
+    eval_duration_minutes = (end_time - start_time) / 60.0
+
     policy.train() # Set the policy back to training mode
     avg_reward = sum(final_rewards_dict.values()) / len(final_rewards_dict) if final_rewards_dict else 0
-    return avg_reward, total_crashes, total_successes
+    total_vehicles_in_eval = len(final_rewards_dict) if final_rewards_dict else 1
+    safety_violation_rate = (len(total_violating_vehicles) / total_vehicles_in_eval) * 100 if total_steps > 0 else 0
+    fairness_index = calculate_theil_index(list(final_rewards_dict.values()))
+    throughput = total_successes / eval_duration_minutes if eval_duration_minutes > 0 else 0
+
+    denominator = total_crashes + total_successes
+    collision_rate = (total_crashes / denominator) * 100 if denominator > 0 else 0
+
+    return avg_reward, total_crashes, total_successes, safety_violation_rate, fairness_index, throughput, collision_rate
 
 def train_mappo():
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
@@ -184,7 +225,7 @@ def train_mappo():
 
     writer = SummaryWriter(f"runs/MAPPO_{int(time.time())}")
     env = LanelessEnv(render_mode=None, max_vehicles=MAX_VEHICLES_TRAIN)
-    policy = ActorCriticGNN_MAPPO(node_feature_dim=1, action_dim=1).to(device)
+    policy = ActorCriticGNN_MAPPO(node_feature_dim=2, action_dim=1).to(device)
     optimizer = optim.Adam(policy.parameters(), lr=POLICY_LR)
     buffer = RolloutBuffer()
 
@@ -271,15 +312,27 @@ def train_mappo():
             # --- Evaluate Policy ---
             if update_count % EVAL_INTERVAL == 0:
                 eval_count += 1
-                avg_reward, total_crashes, total_successes = evaluate_mappo(policy, device)
-                print(f"Avg. Reward: {avg_reward}, Crashes: {total_crashes}, Successes: {total_successes}")
+                avg_reward, total_crashes, total_successes, safety_violation_rate, fairness_index, throughput, collision_rate = evaluate_mappo(policy, device, max_eval_steps=MAX_EVAL_STEPS)
                 writer.add_scalar('Evaluation/AverageReward', avg_reward, eval_count)
-                writer.add_scalar('Evaluation/TotalCrashes', total_crashes, eval_count)
-                writer.add_scalar('Evaluation/TotalSuccesses', total_successes, eval_count)
+                writer.add_scalar('Evaluation/CollisionCount', total_crashes, eval_count)
+                writer.add_scalar('Evaluation/Throughput_vehicles_per_min', throughput, eval_count)
+                # writer.add_scalar('Evaluation/ViolatingVehiclesRate', safety_violation_rate, eval_count)
+                writer.add_scalar('Evaluation/FairnessIndex_Theil', fairness_index, eval_count)
+                writer.add_scalar('Evaluation/CollisionRate_percent', collision_rate, eval_count)
+
+                print(f"\n--- Evaluation {eval_count} ---")
+                print(f"Avg Reward: {avg_reward:.2f}")
+                print(f"Throughput (vehicles/min): {throughput:.2f}")
+                print(f"Collision Count: {total_crashes}")
+                print(f"Collision Rate (%): {collision_rate:.2f}")
+                print(f"Violating Vehicles Rate (%): {safety_violation_rate:.2f}")
+                print(f"Fairness Index (Theil): {fairness_index:.2f}")
+                print("---------------------\n")
+
                 if avg_reward > best_avg_reward:
                     best_avg_reward = avg_reward
                     torch.save(policy.state_dict(), 'mappo_gnn_best.pth')
-                    print(f"New best MAPPO model saved with avg reward {avg_reward}")
+                    print(f"New best MAPPO model saved with avg reward {avg_reward:.2f}")
 
     writer.close()
     env.close()
