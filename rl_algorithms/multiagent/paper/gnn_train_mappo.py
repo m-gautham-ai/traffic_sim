@@ -53,7 +53,6 @@ EPOCHS_PER_UPDATE = 10
 MAX_VEHICLES_EVAL = 10
 MAX_VEHICLES_TRAIN = 10
 MAX_EVAL_STEPS = 4096
-TOTAL_TIMESTEPS = 300000
 
 # --- MAPPO Actor-Critic with GNN ---
 class ActorCriticGNN_MAPPO(nn.Module):
@@ -166,7 +165,6 @@ def evaluate_mappo(policy, device, eval_episodes=10, max_eval_steps=MAX_EVAL_STE
     final_rewards_dict = {}
     total_crashes = 0
     total_successes = 0
-    total_violating_vehicles = set()
     start_time = time.time()
 
     obs, _ = env.reset()
@@ -186,8 +184,6 @@ def evaluate_mappo(policy, device, eval_episodes=10, max_eval_steps=MAX_EVAL_STE
             
             actions_dict = {node_to_vehicle_map[i]: action_tensor[i].item() for i in range(action_tensor.size(0))}
             next_obs, rewards_dict, terminated_vehicles, off_screen_vehicles, is_truncated = env.step(actions_dict)
-
-            total_violating_vehicles.update(env.get_safety_violations())
 
             for vid in terminated_vehicles:
                 if vid not in vehicle_ids_done_dict:
@@ -230,7 +226,7 @@ def train_mappo():
     optimizer = optim.Adam(policy.parameters(), lr=POLICY_LR)
     buffer = RolloutBuffer()
 
-    total_timesteps = TOTAL_TIMESTEPS
+    total_timesteps = 100000
     EVAL_INTERVAL = 2
     eval_count = 0
     update_count = 0
@@ -326,7 +322,6 @@ def train_mappo():
                 print(f"Throughput (vehicles/min): {throughput:.2f}")
                 print(f"Collision Count: {total_crashes}")
                 print(f"Collision Rate (%): {collision_rate:.2f}")
-                print(f"Violating Vehicles Rate (%): {safety_violation_rate:.2f}")
                 print(f"Fairness Index (Theil): {fairness_index:.2f}")
                 print("---------------------\n")
 

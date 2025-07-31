@@ -1,7 +1,8 @@
 pygame==2.5.2
 torch
 torch-geometric
-torch-xla
+qpsolvers
+scipy
 
 gymnasium==0.29.1
 torch==2.3.1

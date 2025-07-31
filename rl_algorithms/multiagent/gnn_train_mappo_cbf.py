@@ -11,6 +11,8 @@ from torch_geometric.nn import GCNConv, global_mean_pool
 from torch_geometric.data import Data, Batch
 from torch.distributions import Normal
 from torch.utils.tensorboard import SummaryWriter
+import qpsolvers
+
 
 def calculate_theil_index(rewards):
     """Calculates the Theil index for a list of rewards."""
@@ -19,7 +21,6 @@ def calculate_theil_index(rewards):
     if n < 2:
         return 0.0
 
-    # Shift rewards to be non-negative for Theil index calculation
     min_reward = np.min(rewards)
     if min_reward < 0:
         rewards += -min_reward
@@ -28,19 +29,15 @@ def calculate_theil_index(rewards):
     if mean_reward == 0:
         return 0.0
 
-    # Theil's T Index - with protection against log(0)
     with np.errstate(divide='ignore', invalid='ignore'):
-        # Add a small epsilon to the argument of log to avoid log(0)
         log_term = np.log((rewards / mean_reward) + 1e-9)
         term = (rewards / mean_reward) * log_term
-        term[np.isnan(term)] = 0 # Replace NaNs resulting from 0 * log(0)
+        term[np.isnan(term)] = 0
         theil_index = np.sum(term) / n
 
     return theil_index if not np.isnan(theil_index) else 0.0
 
-
 import time
-
 from laneless_env import LanelessEnv
 
 # --- Constants ---
@@ -52,22 +49,16 @@ BATCH_SIZE = 2048
 EPOCHS_PER_UPDATE = 10
 MAX_VEHICLES_EVAL = 10
 MAX_VEHICLES_TRAIN = 10
-MAX_EVAL_STEPS = 4096
-TOTAL_TIMESTEPS = 300000
+MAX_EVAL_STEPS = 10000
+CBF_GAMMA = 0.5  # CBF parameter
 
-# --- MAPPO Actor-Critic with GNN ---
 class ActorCriticGNN_MAPPO(nn.Module):
     def __init__(self, node_feature_dim, action_dim):
         super(ActorCriticGNN_MAPPO, self).__init__()
-        # Shared GNN layers
         self.conv1 = GCNConv(node_feature_dim, 128)
         self.conv2 = GCNConv(128, 128)
-
-        # Actor Head (Decentralized)
         self.actor_mean = nn.Linear(128, action_dim)
         self.actor_log_std = nn.Parameter(torch.zeros(1, action_dim))
-
-        # Critic Head (Centralized)
         self.critic_fc = nn.Sequential(
             nn.Linear(128, 64),
             nn.ReLU(),
@@ -76,24 +67,15 @@ class ActorCriticGNN_MAPPO(nn.Module):
 
     def forward(self, data):
         x, edge_index, batch = data.x, data.edge_index, data.batch
-
-        # Shared GNN processing
         x = F.relu(self.conv1(x, edge_index))
         x = F.relu(self.conv2(x, edge_index))
-
-        # --- Actor (Decentralized) ---
-        mean = torch.tanh(self.actor_mean(x)) # Action mean for each node
+        mean = torch.tanh(self.actor_mean(x))
         log_std = self.actor_log_std.expand_as(mean)
         std = torch.exp(log_std)
         dist = Normal(mean, std)
-
-        # --- Critic (Centralized) ---
-        # Aggregate node features for a global state representation
         global_x = global_mean_pool(x, batch)
-        value = self.critic_fc(global_x) # Single value for the entire graph (state)
-
+        value = self.critic_fc(global_x)
         return dist, value
-
 
 class RolloutBuffer:
     def __init__(self):
@@ -108,58 +90,118 @@ class RolloutBuffer:
         self.dones.append(dones)
 
     def calculate_advantages(self, last_value, last_done):
-        # For actor (decentralized advantages)
-        last_gae_lam = torch.zeros(self.rewards[-1].shape[0], 1).to(last_value.device)
-        # For critic (centralized returns)
-        last_central_gae_lam = 0
-
+        # Initialize last_gae_lam as a tensor of the correct size for the last step
+        last_gae_lam = torch.zeros_like(self.rewards[-1])
         self.advantages = []
-        self.critic_returns = []
+        self.returns = []
 
         for t in reversed(range(len(self.rewards))):
             if t == len(self.rewards) - 1:
                 next_non_terminal = 1.0 - last_done
                 next_value = last_value
             else:
-                next_non_terminal = 1.0 - self.dones[t + 1]
-                next_value = self.values[t + 1]
+                next_non_terminal = 1.0 - self.dones[t+1]
+                next_value = self.values[t+1]
 
-            # --- Decentralized Advantage Calculation (for Actor) ---
-            rewards = self.rewards[t]
-            num_agents_t = rewards.shape[0]
-            current_value_broadcast = self.values[t].expand(num_agents_t, 1)
-            next_value_broadcast = next_value.expand(num_agents_t, 1)
+            # Handle shape changes in value tensors
+            num_agents_t = self.rewards[t].shape[0]
+            if next_value.shape[0] != num_agents_t:
+                # This can happen if the last agent departs. Assume its value is 0.
+                # We need a value for each agent at time t.
+                # A global critic value is used, so we can just use the first element.
+                next_value_broadcast = next_value[0].expand(num_agents_t, 1)
+            else:
+                next_value_broadcast = next_value
 
+            delta = self.rewards[t] + GAMMA * next_value_broadcast * next_non_terminal - self.values[t]
+
+            # Handle shape changes in advantage tensor (last_gae_lam)
             if last_gae_lam.shape[0] != num_agents_t:
-                last_gae_lam_padded = torch.zeros(num_agents_t, 1).to(last_gae_lam.device)
+                # Pad with zeros for agents that don't exist at t+1
+                padded_gae_lam = torch.zeros(num_agents_t, 1).to(last_gae_lam.device)
                 slice_len = min(num_agents_t, last_gae_lam.shape[0])
-                last_gae_lam_padded[:slice_len] = last_gae_lam[:slice_len]
-                last_gae_lam = last_gae_lam_padded
+                padded_gae_lam[:slice_len] = last_gae_lam[:slice_len]
+                last_gae_lam = padded_gae_lam
 
-            delta = rewards + GAMMA * next_value_broadcast * next_non_terminal - current_value_broadcast
             last_gae_lam = delta + GAMMA * GAE_LAMBDA * next_non_terminal * last_gae_lam
             self.advantages.insert(0, last_gae_lam)
-
-            # --- Centralized Return Calculation (for Critic) ---
-            mean_reward = rewards.mean()
-            current_value = self.values[t]
-            
-            central_delta = mean_reward + GAMMA * next_value * next_non_terminal - current_value
-            last_central_gae_lam = central_delta + GAMMA * GAE_LAMBDA * next_non_terminal * last_central_gae_lam
-            self.critic_returns.insert(0, last_central_gae_lam + current_value)
+            self.returns.insert(0, last_gae_lam + self.values[t])
 
     def clear(self):
-        self.graphs = []
-        self.actions = []
-        self.log_probs = []
-        self.rewards = []
-        self.values = []
-        self.dones = []
-        self.advantages = []
-        self.critic_returns = []
+        self.graphs, self.actions, self.log_probs, self.rewards, self.values, self.dones = [], [], [], [], [], []
+        self.advantages, self.returns = [], []
+
+def apply_cbf(env, nominal_actions):
+    safe_actions = {}
+    vehicle_ids = list(nominal_actions.keys())
+    # Create a dictionary of active vehicle objects for efficient lookup
+    vehicle_objects = {v.id: v for v in env.simulation.sprites}
+
+    for i, vid in enumerate(vehicle_ids):
+        u_nominal = np.array([nominal_actions[vid]])
+
+        # Skip if the vehicle for this action no longer exists
+        if vid not in vehicle_objects:
+            safe_actions[vid] = u_nominal[0]
+            continue
+
+        vehicle_i = vehicle_objects[vid]
+        constraints = []
+
+        for j, other_vid in enumerate(vehicle_ids):
+            if i == j: continue
+            
+            # Skip if the other vehicle in the pair no longer exists
+            if other_vid not in vehicle_objects:
+                continue
+
+            vehicle_j = vehicle_objects[other_vid]
+
+            p_i = np.array([vehicle_i.x, vehicle_i.y])
+            p_j = np.array([vehicle_j.x, vehicle_j.y])
+            # Assuming velocity is primarily horizontal for 'right' direction vehicles
+            v_i = np.array([vehicle_i.speed, 0.0])
+            v_j = np.array([vehicle_j.speed, 0.0])
+
+            d = p_i - p_j
+            d_norm = np.linalg.norm(d)
+            # The safety distance is based on the widths of the two vehicles
+            safety_distance = (vehicle_i.width + vehicle_j.width) * 0.5 * 1.5 # Using a 1.5x safety factor
+            h = d_norm**2 - safety_distance**2
+
+            L_f_h = 2 * np.dot(d, v_i - v_j)
+            # Action is acceleration, assume it affects velocity directly.
+            # The g(x) term depends on the vehicle's dynamics model.
+            # Assuming action is applied to y-velocity component.
+            g_i = np.array([0, 1])
+            g_j = np.array([0, 1])
+            L_g_h = 2 * np.dot(d, g_i - g_j)
+
+            if abs(L_g_h) > 1e-6: # Check for non-zero to avoid trivial constraints
+                constraints.append((np.array([[L_g_h]]), np.array([-L_f_h - CBF_GAMMA * h])))
+
+        if not constraints:
+            safe_actions[vid] = u_nominal[0]
+            continue
+
+        # Setup and solve the QP
+        G = np.vstack([c[0] for c in constraints])
+        h_constr = np.vstack([c[1] for c in constraints])
+        P = np.eye(1) * 2 # Quadratic term: (u - u_nominal)^2
+        q = -2 * u_nominal # Linear term
+
+        try:
+            # qpsolvers expects float64
+            u_safe = qpsolvers.solve_qp(P.astype(np.float64), q.astype(np.float64), G=G.astype(np.float64), h=h_constr.astype(np.float64), solver='cvxopt')
+            safe_actions[vid] = u_safe[0] if u_safe is not None else u_nominal[0]
+        except Exception as e:
+            # If solver fails, fallback to nominal action
+            safe_actions[vid] = u_nominal[0]
+
+    return safe_actions
 
 def evaluate_mappo(policy, device, eval_episodes=10, max_eval_steps=MAX_EVAL_STEPS):
-    policy.eval() # Set the policy to evaluation mode
+    policy.eval()
     env = LanelessEnv(render_mode=None, max_vehicles=MAX_VEHICLES_EVAL)
     total_steps = 0
     vehicle_ids_done_dict = {}
@@ -170,7 +212,7 @@ def evaluate_mappo(policy, device, eval_episodes=10, max_eval_steps=MAX_EVAL_STE
     start_time = time.time()
 
     obs, _ = env.reset()
-    with torch.no_grad(): # Disable gradient calculations for evaluation
+    with torch.no_grad():
         while total_steps < max_eval_steps:
             graph_data, node_to_vehicle_map = env.get_graph(obs)
 
@@ -183,9 +225,11 @@ def evaluate_mappo(policy, device, eval_episodes=10, max_eval_steps=MAX_EVAL_STE
 
             dist, _ = policy(graph_data.to(device))
             action_tensor = dist.mean
-            
             actions_dict = {node_to_vehicle_map[i]: action_tensor[i].item() for i in range(action_tensor.size(0))}
-            next_obs, rewards_dict, terminated_vehicles, off_screen_vehicles, is_truncated = env.step(actions_dict)
+            
+            safe_actions = apply_cbf(env, actions_dict)
+
+            next_obs, rewards_dict, terminated_vehicles, off_screen_vehicles, is_truncated = env.step(safe_actions)
 
             total_violating_vehicles.update(env.get_safety_violations())
 
@@ -207,7 +251,7 @@ def evaluate_mappo(policy, device, eval_episodes=10, max_eval_steps=MAX_EVAL_STE
     end_time = time.time()
     eval_duration_minutes = (end_time - start_time) / 60.0
 
-    policy.train() # Set the policy back to training mode
+    policy.train()
     avg_reward = sum(final_rewards_dict.values()) / len(final_rewards_dict) if final_rewards_dict else 0
     total_vehicles_in_eval = len(final_rewards_dict) if final_rewards_dict else 1
     safety_violation_rate = (len(total_violating_vehicles) / total_vehicles_in_eval) * 100 if total_steps > 0 else 0
@@ -219,18 +263,17 @@ def evaluate_mappo(policy, device, eval_episodes=10, max_eval_steps=MAX_EVAL_STE
 
     return avg_reward, total_crashes, total_successes, safety_violation_rate, fairness_index, throughput, collision_rate
 
-def train_mappo():
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    device = "cpu"
+def train_mappo_cbf():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    writer = SummaryWriter(f"runs/MAPPO_{int(time.time())}")
+    writer = SummaryWriter(f"runs/MAPPO_CBF_{int(time.time())}")
     env = LanelessEnv(render_mode=None, max_vehicles=MAX_VEHICLES_TRAIN)
     policy = ActorCriticGNN_MAPPO(node_feature_dim=2, action_dim=1).to(device)
     optimizer = optim.Adam(policy.parameters(), lr=POLICY_LR)
     buffer = RolloutBuffer()
 
-    total_timesteps = TOTAL_TIMESTEPS
+    total_timesteps = 100000
     EVAL_INTERVAL = 2
     eval_count = 0
     update_count = 0
@@ -239,7 +282,6 @@ def train_mappo():
     obs, _ = env.reset()
 
     for timestep in range(1, total_timesteps + 1):
-        # --- Collect Experience ---
         graph_data, node_to_vehicle_map = env.get_graph(obs)
 
         if graph_data is None or graph_data.num_nodes == 0:
@@ -250,15 +292,16 @@ def train_mappo():
         with torch.no_grad():
             dist, value = policy(graph_data.to(device))
             action_tensor = dist.sample()
-            log_prob = dist.log_prob(action_tensor).sum()
+            log_prob = dist.log_prob(action_tensor)
 
         actions_dict = {node_to_vehicle_map[i]: action_tensor[i].item() for i in range(action_tensor.size(0))}
-        next_obs, rewards_dict, _, _, is_truncated = env.step(actions_dict)
+        safe_actions = apply_cbf(env, actions_dict)
+        next_obs, rewards_dict, _, _, is_truncated = env.step(safe_actions)
 
         rewards_tensor = torch.tensor([rewards_dict.get(vid, 0.0) for vid in node_to_vehicle_map.values()], dtype=torch.float32).unsqueeze(1).to(device)
         dones_tensor = torch.tensor([is_truncated] * len(node_to_vehicle_map), dtype=torch.float32).unsqueeze(1).to(device)
         
-        buffer.add(graph_data, action_tensor, log_prob, rewards_tensor, value, dones_tensor[0]) # Only need one done flag for the whole state
+        buffer.add(graph_data, action_tensor, log_prob, rewards_tensor, value, dones_tensor[0])
 
         obs = next_obs
 
@@ -275,33 +318,30 @@ def train_mappo():
             
             buffer.calculate_advantages(last_value, torch.tensor(is_truncated, dtype=torch.float32).to(device))
 
-            # --- PPO Update ---
             batched_graph = Batch.from_data_list(buffer.graphs).to(device)
             old_actions = torch.cat(buffer.actions).to(device)
-            old_log_probs = torch.stack(buffer.log_probs).to(device)
+            old_log_probs = torch.cat(buffer.log_probs).to(device)
             advantages = torch.cat(buffer.advantages).detach()
-            # For the critic, we need to reshape the returns to match the output shape
-            critic_returns = torch.stack(buffer.critic_returns).detach()
+            returns = torch.cat(buffer.returns).detach()
 
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
             for _ in range(EPOCHS_PER_UPDATE):
                 dist, new_values = policy(batched_graph)
-                new_log_probs = dist.log_prob(old_actions)
+                new_log_probs = dist.log_prob(old_actions).sum(dim=-1)
 
-                # The critic loss is centralized
-                # new_values is (batch_size, 1), critic_returns is (batch_size, 1, 1)
-                # We squeeze the returns to match
-                critic_loss = F.mse_loss(new_values, critic_returns.squeeze(2))
+                # The critic is centralized (per-graph), but returns are per-agent.
+                # We must expand the critic's values to match the returns.
+                expanded_new_values = new_values.repeat_interleave(batched_graph.batch.bincount(), dim=0)
+                critic_loss = F.mse_loss(expanded_new_values.squeeze(), returns.squeeze())
 
-                # The actor loss is decentralized, but uses the centralized advantage
                 ratio = (new_log_probs - old_log_probs).exp()
                 surr1 = ratio * advantages
                 surr2 = torch.clamp(ratio, 1 - CLIP_EPSILON, 1 + CLIP_EPSILON) * advantages
                 actor_loss = -torch.min(surr1, surr2).mean()
 
                 entropy = dist.entropy().mean()
-                loss = actor_loss + 0.5 * critic_loss - 0.05 * entropy
+                loss = actor_loss + 0.5 * critic_loss - 0.01 * entropy
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -310,14 +350,13 @@ def train_mappo():
             buffer.clear()
             print("--- Policy Updated ---")
 
-            # --- Evaluate Policy ---
             if update_count % EVAL_INTERVAL == 0:
                 eval_count += 1
                 avg_reward, total_crashes, total_successes, safety_violation_rate, fairness_index, throughput, collision_rate = evaluate_mappo(policy, device, max_eval_steps=MAX_EVAL_STEPS)
                 writer.add_scalar('Evaluation/AverageReward', avg_reward, eval_count)
                 writer.add_scalar('Evaluation/CollisionCount', total_crashes, eval_count)
                 writer.add_scalar('Evaluation/Throughput_vehicles_per_min', throughput, eval_count)
-                # writer.add_scalar('Evaluation/ViolatingVehiclesRate', safety_violation_rate, eval_count)
+                writer.add_scalar('Evaluation/ViolatingVehiclesRate', safety_violation_rate, eval_count)
                 writer.add_scalar('Evaluation/FairnessIndex_Theil', fairness_index, eval_count)
                 writer.add_scalar('Evaluation/CollisionRate_percent', collision_rate, eval_count)
 
@@ -332,12 +371,11 @@ def train_mappo():
 
                 if avg_reward > best_avg_reward:
                     best_avg_reward = avg_reward
-                    torch.save(policy.state_dict(), 'mappo_gnn_best.pth')
-                    print(f"New best MAPPO model saved with avg reward {avg_reward:.2f}")
+                    torch.save(policy.state_dict(), 'mappo_cbf_gnn_best.pth')
+                    print(f"New best MAPPO+CBF model saved with avg reward {avg_reward:.2f}")
 
     writer.close()
     env.close()
 
 if __name__ == '__main__':
-    train_mappo()
-
+    train_mappo_cbf()
