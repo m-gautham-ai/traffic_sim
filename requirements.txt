@@ -1,4 +1,8 @@
 pygame==2.5.2
+torch
+torch-geometric
+torch-xla
+
 gymnasium==0.29.1
 torch==2.3.1
 numpy==1.26.2
